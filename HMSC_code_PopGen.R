@@ -1,11 +1,15 @@
 #-----------------------------------------------------------------------------
-#################HMSC Analysis adapted by Nick Fountain-Jones#################
+#################Joint species distributionmodels (JSDM) by Nick Fountain-Jones#################
 #-----------------------------------------------------------------------------
 
 #prelims
 rm(list = ls())
 library(HMSC)
 set.seed(29698)
+library(extendedForest)
+library(gradientForest) #needs extended forest. Both are available here:https://r-forge.r-project.org/R/?group_id=973
+
+
 
 #-----------------------------------------------------------------------------
 #################Read Data#################
@@ -17,24 +21,19 @@ Y <- read.csv("GammSNPsWS.csv", head= T, row.names=1)
 Y <- ifelse(Y > 0, 1, 0)
 # Covariates (no NAs  -must be numeric)
 X <- read.csv("EnvGammaWS.csv", head= T, row.names=1);str(X)
+
+if(colnames(X)==colnames(Y))
+{
+  print("identical")
+}
 #select variables to add to the model
 library(dplyr)
-SubX <- X %>% select( 'Year', 'Hunting', 'EuclideanDIstPCA1', 'EuclideanDIstPCA2', 'rdsPCO1', 'rdsPCO2')
-
+SubX <- X %>% select( 'Year','Hunting', 'EuclideanDIstPCA1', 'EuclideanDIstPCA2')
+SubX$Hunting <-as.factor(SubX$Hunting);str(SubX)
 
 #check correlations
-library(Hmisc)
-res <-rcorr(XMat, type=c("spearman"))
-flattenCorrMatrix <- function(cormat, pmat) {
-  ut <- upper.tri(cormat)
-  data.frame(
-    row = rownames(cormat)[row(cormat)[ut]],
-    column = rownames(cormat)[col(cormat)[ut]],
-    cor  =(cormat)[ut],
-    p = pmat[ut]
-  )
-}
-flattenCorrMatrix(res$r, res$P)
+library(GGally)
+ggpairs(SubX, aes(alpha = 0.4))
 
 # Random effects
 Pi <- read.csv("PiGammaWS.csv", head= T, row.names=1);str(Pi)
@@ -42,16 +41,37 @@ Pi <- read.csv("PiGammaWS.csv", head= T, row.names=1);str(Pi)
 # Covert all columns of Pi to a factor
 Pi <- data.frame(apply(Pi,2,as.factor));str(Pi)
 
-
-
-#Turn into matrices 
+#Turn into matrices for HMSC 
 YMat<-as.matrix(Y)
 XMat<-model.matrix(~.,data=SubX)
 
-if(colnames(X)==colnames(Y))
-{
-  print("identical")
-  }
+
+
+#-----------------------------------------------------------------------------
+#################Gradient Forests################# 
+#-----------------------------------------------------------------------------
+#useful for larger datasets
+
+nSites <- dim(Y)[1]
+nSpecs <- dim(Y)[2]
+
+#work out how many predictors should be used at each node (mtry)
+lev <- floor(log2(nSites * 0.368/2))
+lev
+#run analysis
+gf <- gradientForest(cbind(SubX, Y), predictor.vars = colnames(SubX), response.vars = colnames(Y), ntree = 1000, transform = NULL, compact = T,nbin = 201, maxLevel = lev, corr.threshold = 0.5)#gf doesn't handle factors
+gf
+#variable importance
+most_important <- names(importance(gf))[1:25]
+par(mgp = c(2, 2, 2))
+#plots
+par(mfrow = c(1,1))
+plot(gf, plot.type = "O")
+plot(gf, plot.type = "C", imp.vars = most_important, show.species = F, common.scale = T, cex.axis = 0.6, cex.lab = 0.7, line.ylab = 0.9, par.args = list(mgp = c(1.5,0.5, 0), mar = c(2.5, 1, 0.1, 0.5), omi = c(0, 0.3, 0, 0)))
+plot(gf, plot.type = "C", imp.vars = most_important, show.overall = F, legend = T, leg.posn = "topleft",leg.nspecies = 10, cex.lab = 0.7, cex.legend = 0.9,cex.axis = 0.6, line.ylab = 0.9, par.args = list(mgp = c(1.5,0.5, 0), mar = c(2.5, 1, 0.1, 0.5), omi = c(0, 0.3, 0, 0)))
+plot(gf, plot.type = "P", show.names = T, horizontal = F,cex.axis = 1, cex.labels = 0.7, line = 2.5)
+
+dev.off()
 #-----------------------------------------------------------------------------
 #################Create HMSC objects and set priors#################
 #-----------------------------------------------------------------------------
@@ -68,7 +88,7 @@ formparam <- as.HMSCparam(formdata, formprior)
 #################Run the HMSC model#################
 #-----------------------------------------------------------------------------
 #run the model  
-modelWSGamma<- hmsc(formdata , family = "probit", niter = 30000, nburn = 3000,
+modelWSGamma<- hmsc(formdata , family = "probit", niter = 60000, nburn = 6000,
                thin = 250)
 #save
 save(modelWSGamma,  file = "modelWSGamma .RData")
@@ -99,9 +119,9 @@ p + geom_point(size = 0.01, stroke = 0, shape = 16)+
 par(mar = c(7, 4, 4, 2))
 boxplot(mixingDF, las = 2)
 ### Summary table
-average <- apply(model1$results$estimation$paramX, 1:2, mean)
-CI.025 <- apply(model1$results$estimation$paramX, 1:2, quantile, probs=0.025)
-CI.975 <- apply(model1$results$estimation$paramX, 1:2, quantile, probs=0.975)
+average <- apply(modelWSGamma $results$estimation$paramX, 1:2, mean)
+CI.025 <- apply(modelWSGamma $results$estimation$paramX, 1:2, quantile, probs=0.025)
+CI.975 <- apply(modelWSGamma $results$estimation$paramX, 1:2, quantile, probs=0.975)
 CI <- cbind(as.vector(CI.025), as.vector(CI.975))
 
 paramXCITable <- cbind(unlist(as.data.frame(average)),
@@ -112,17 +132,17 @@ rownames(paramXCITable) <- paste(rep(colnames(average),
                                      each = nrow(average)), "_",
                                  rep(rownames(average),
                                      ncol(average)), sep="")
-write.csv(paramXCITable, file='CoinfectionModel1.csv')
+write.csv(paramXCITable, file='WSGamaaModel1.csv')
  
 #-----------------------------------------------------------------------------
 #################variation partioning#################
 #-----------------------------------------------------------------------------
 #group covariates
 head(SubX)
-groupCov <- c(rep ("Temporal", 2),rep("Spatial", 2), rep("Roads", 2))
+groupCov <- c(rep ("Temporal", 2),rep("Spatial", 2))
 variationPart <- variPart(modelWSGamma ,groupX= c("Intercept",groupCov))
 par(mar=c(5,5,5,1))
-barplot(t(variationPart), las=2, col= rainbow(9), cex.names=0.75, cex.axis=0.75,
+barplot(t(variationPart), las=2, col= rainbow(5), cex.names=0.75, cex.axis=0.75,
         legend.text=paste(colnames(variationPart)," ",
                           signif(100*colMeans(variationPart),2),"%",sep=""),
         args.legend=list(y=1.2, xjust=1, horiz=F, bty="n",cex=0.75))
@@ -131,8 +151,8 @@ barplot(t(variationPart), las=2, col= rainbow(9), cex.names=0.75, cex.axis=0.75,
 # Prevalence
 prevSp <- colSums(Y)
 # Coefficient of multiple determination
-R2 <- Rsquared(modelprev5BabFIV , averageSp = FALSE)
-R2comm <- Rsquared(modelprev5BabFIV , averageSp = TRUE)
+R2 <- Rsquared(modelWSGamma , averageSp = FALSE)
+R2comm <- Rsquared(modelWSGamma , averageSp = TRUE)
 par(mar=c(5,6,0.5,0.5))
 plot(prevSp, R2, xlab = "Prevalence",
      ylab = expression(R^2), pch=19, las=1,cex.lab = 2)
@@ -141,13 +161,12 @@ abline(h = R2comm, col = "blue", lwd = 2)
 #-----------------------------------------------------------------------------
 #################Testing for associations#################
 #-----------------------------------------------------------------------------
-assoMat <- corRandomEff(modelMay2018traits)
+assoMat <- corRandomEff(modelWSGamma)
 library(corrplot)
 library(circlize)
 # Average
 IndividualMean <- apply(assoMat[, , , 1], 1:2, mean)
-YearMean <- apply(assoMat[, , , 3], 1:2, mean)
-PrideYearMean<- apply(assoMat[, , , 2], 1:2, mean)
+
 #=======================
 ### Associations to draw
 #=======================
@@ -157,15 +176,15 @@ PrideYearMean<- apply(assoMat[, , , 2], 1:2, mean)
 # Build matrix of colours for chordDiagram
 IndivDrawCol <- matrix(NA, nrow = nrow(IndividualMean),
                       ncol = ncol(IndividualMean))
-IndivDrawCol[which(IndividualMean > 0.4, arr.ind=TRUE)]<-"red"
-IndivDrawCol[which(IndividualMean < -0.4, arr.ind=TRUE)]<-"blue"
+IndivDrawCol[which(IndividualMean > 0.8, arr.ind=TRUE)]<-"red"
+IndivDrawCol[which(IndividualMean < -0.8, arr.ind=TRUE)]<-"blue"
 # Build matrix of "significance" for corrplot
 IndivDraw <- IndivDrawCol
 IndivDraw[which(!is.na(IndivDraw), arr.ind = TRUE)] <- 0
 IndivDraw[which(is.na(IndivDraw), arr.ind = TRUE)] <- 1
 IndivDraw <- matrix(as.numeric(IndivDraw), nrow = nrow(IndividualMean),
                    ncol = ncol(IndividualMean))
-par(mfrow=c(1,2))
+par(mfrow=c(1,1))
 # Matrix plot
 Colour <- colorRampPalette(c("blue", "white", "red"))(200)
 corrplot(IndividualMean, method = "color", col = Colour, type = "lower",
@@ -176,89 +195,7 @@ chordDiagram(IndividualMean, symmetric = TRUE,
              grid.col = "grey", col = IndivDrawCol)
 write.csv(paramXCITable, file='ChannelTest1.csv')
 
-#--------------------
-### Pride-Year level effect
-#--------------------
-# Build matrix of colours for chordDiagram
-PrideYearDrawCol <- matrix(NA, nrow = nrow(PrideYearMean),
-                       ncol = ncol(PrideYearMean))
-PrideYearDrawCol[which(PrideYearMean > 0.3, arr.ind=TRUE)]<-"red"
-IndivDrawCol[which(PrideYearMean < -0.3, arr.ind=TRUE)]<-"blue"
-# Build matrix of "significance" for corrplot
-PrideYearDraw <- PrideYearDrawCol
-PrideYearDraw[which(!is.na(PrideYearDraw), arr.ind = TRUE)] <- 0
-PrideYearDraw[which(is.na(PrideYearDraw), arr.ind = TRUE)] <- 1
-PrideYearDraw <- matrix(as.numeric(PrideYearDraw), nrow = nrow(PrideYearMean),
-                    ncol = ncol(PrideYearMean))
-par(mfrow=c(1,2))
-# Matrix plot
-Colour <- colorRampPalette(c("blue", "white", "red"))(200)
-corrplot(PrideYearMean, method = "color", col = Colour, type = "lower",
-         diag = FALSE, p.mat = PrideYearDraw, tl.srt = 45)
-# Chord diagram
-chordDiagram(PrideYearMean, symmetric = TRUE,
-             annotationTrack = c("name", "grid"),
-             grid.col = "grey", col = PrideYearDrawCol, link.lty=0.1)
-#--------------------
-### Year level effect
-#--------------------
-# Build matrix of colours for chordDiagram. Change to 0.5 to make focus on strong interactions
-YearDrawCol <- matrix(NA, nrow = nrow(YearMean),
-                      ncol = ncol(YearMean))
-YearDrawCol[which(YearMean > 0.4, arr.ind=TRUE)]<-"red"
-YearDrawCol[which(YearMean < -0.4, arr.ind=TRUE)]<-"blue"
 
-# Build matrix of "significance" for corrplot
-
-YearDraw <- YearDrawCol
-YearDraw[which(!is.na(YearDraw), arr.ind = TRUE)] <- 0
-YearDraw[which(is.na(YearDraw), arr.ind = TRUE)] <- 1
-YearDraw <- matrix(as.numeric(YearDraw), nrow = nrow(YearMean),
-                   ncol = ncol(YearMean))
-
-#do the following code 
-par(mfrow=c(1,2))
-# Matrix plot
-Colour <- colorRampPalette(c("blue", "white", "red"))(200)
-corrplot(YearMean, method = "color", col = Colour, type = "lower",
-         diag = FALSE, p.mat = YearDraw, tl.srt = 45)
-# Chord diagram
-chordDiagram(YearMean, symmetric = TRUE,
-             annotationTrack = c("name", "grid"),
-             grid.col = "grey", col = YearDrawCol)
-
-#=======================
-### Traits
-#=======================
-mixingTr <-as.mcmc(modelMay2018traitsHighRes, parameters = "paramTr")
-effectiveSize(mixingTr)
-full <- ggs(mixingTr)
-p <- ggs_caterpillar(full)
-p + geom_point(size = 0.01, stroke = 0, shape = 16) 
-#trait table
-average <- apply(modelMay2018traits$results$estimation$paramTr, 1:2, mean)
-CI.025 <- apply(modelMay2018traits$results$estimation$paramTr, 1:2, quantile,
-                probs = 0.025)
-CI.975 <- apply(modelMay2018traits$results$estimation$paramTr, 1:2, quantile,
-                probs = 0.975)
-CI <- cbind(as.vector(CI.025), as.vector(CI.975))
-plot(0, 0, xlim = c(1, nrow(CI)), ylim = range(CI), type = "n",
-     xlab = "", ylab = "", main = "paramX")
-abline(h = 0, col = "grey")
-
-arrows(x0 = 1:nrow(CI), x1 = 1:nrow(CI), y0 = CI[, 1], y1 = CI[, 2],
-       code = 3, angle = 90, length = 0.05)
-points(1:nrow(CI), average, pch = 15, cex = 1.5)
-
-paramXCITrTable <- cbind(unlist(as.data.frame(average)),
-                         unlist(as.data.frame(CI.025)),
-                         unlist(as.data.frame(CI.975)))
-colnames(paramXCITable) <- c("paramX", "lowerCI", "upperCI")
-rownames(paramXCITable) <- paste(rep(colnames(average),
-                                     each = nrow(average)), "_",
-                                 rep(rownames(average),
-                                     ncol(average)), sep="")
-write.csv(paramXCITable, file='Pathtraits.csv')
 
 #-------------------------
 #Latent effectsModel - work in progress
